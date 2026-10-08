@@ -1,6 +1,11 @@
 #include "board/drivers/drivers.h"
 #include "opendbc/safety/ignition.h"
 
+#if !defined(PANDA_JUNGLE) && !defined(PANDA_BODY)
+#define HCA_HEARTBEAT
+#include "board/drivers/hca_heartbeat.h"
+#endif
+
 uint32_t safety_tx_blocked = 0;
 uint32_t safety_rx_invalid = 0;
 uint32_t tx_buffer_overflow = 0;
@@ -177,7 +182,13 @@ bool can_check_checksum(CANPacket_t *packet) {
 }
 
 void can_send(CANPacket_t *to_push, uint8_t bus_number, bool skip_tx_hook) {
-  if (skip_tx_hook || safety_tx_hook(to_push) != 0) {
+  bool allowed = skip_tx_hook || (safety_tx_hook(to_push) != 0);
+  #ifdef HCA_HEARTBEAT
+  if (!skip_tx_hook) {
+    hca_heartbeat_tx_hook(to_push, bus_number, allowed);
+  }
+  #endif
+  if (allowed) {
     if (bus_number < PANDA_CAN_CNT) {
       // add CAN packet to send queue
       tx_buffer_overflow += can_push(can_queues[bus_number], to_push) ? 0U : 1U;

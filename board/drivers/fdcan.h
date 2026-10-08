@@ -13,7 +13,11 @@ static bool can_set_speed(uint8_t can_number) {
     bus_config[bus_number].can_data_speed,
     bus_config[bus_number].canfd_non_iso,
     can_loopback,
+    #ifdef HCA_HEARTBEAT
+    can_silent && !((bus_number == 0U) && hca_heartbeat_eps_awake)
+    #else
     can_silent
+    #endif
   );
   return ret;
 }
@@ -221,6 +225,9 @@ void can_rx(uint8_t can_number) {
 
     safety_rx_invalid += safety_rx_hook(&to_push) ? 0U : 1U;
     ignition_can_hook(&to_push);
+    #ifdef HCA_HEARTBEAT
+    hca_heartbeat_rx_hook(&to_push);
+    #endif
 
     led_set(LED_BLUE, true);
     rx_buffer_overflow += can_push(&can_rx_q, &to_push) ? 0U : 1U;
