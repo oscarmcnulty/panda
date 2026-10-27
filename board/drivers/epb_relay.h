@@ -29,7 +29,8 @@
 //   main.c's tick handler polls epb_relay_should_engage() at 8 Hz and flips the relay.
 //
 // SAFETY: only EPB_01 bus2->bus0 and ESP_05 bus0->bus2 are ever modified; every other
-//   frame forwards byte-for-byte. The decel command fails safe (EPB_01 passes through
+//   frame forwards byte-for-byte. ACC_05 (bus 1, listen-only) is additionally re-sent unchanged
+//   onto bus 2 so the EPB receives the clamp request (EPB_ACC05_FWD_ENABLE). The decel command fails safe (EPB_01 passes through
 //   untouched -> no autonomous braking) when:
 //     - ACC_05 is stale (no counter-valid frame recently), OR
 //     - ACC_Freigabe_Verzanf == 0 (openpilot not requesting EPB braking), OR
@@ -73,6 +74,15 @@
 #define EPB_RELEASE_FRAMES      75U  // ESP_05 frames to ACTIVELY command release after clamp drops
                                      //   (~1.5 s @50 Hz) before falling back to passthrough -- guarantees
                                      //   a deterministic open on launch, covering the ~1 s motor release.
+
+// ---- ACC_05 -> EPB forward (2026-10-26) ----------------------------------------------------
+// The EPB module RX-decodes ACC_05 (0x10D) and clamps on ACC_Betaetigung_EPB (byte7 bit4, a held
+// level; see vag-ecu-re ecus/epb/docs/acc05_epb_clamp_path.md). openpilot's ACC_05 only exists on
+// the extended CAN (our bus 1, listen-only) and the gateway does not route it to the EPB's CAN, so
+// the EPB has never seen it. Re-transmit every checksum+counter-valid ACC_05 unchanged (same E2E
+// counter/checksum) onto bus 2 (EPB side) while the bridge is engaged. Only the EPB is on bus 2, so
+// this contends with nothing; the gateway/ABS side (bus 0) never sees it.
+#define EPB_ACC05_FWD_ENABLE    1U
 
 typedef struct {
   bool     brake_active;   // ACC_Freigabe_Verzanf == 1
@@ -123,6 +133,14 @@ static void epb_relay_rx(const CANPacket_t *rx, uint8_t bus) {
     epb_relay.epb_clamp    = betaet_epb;
     epb_relay.fresh        = EPB_RELAY_FRESH_FRAMES;
     epb_relay.acc05_good  += 1U;                       // heartbeat tick
+
+    // forward to the EPB only while engaged (forwarding enabled = bus 2 live, relay open)
+    if ((EPB_ACC05_FWD_ENABLE != 0U) && !current_safety_config.disable_forwarding) {
+      CANPacket_t fwd = *rx;
+      fwd.bus = 2U;
+      can_set_checksum(&fwd);
+      can_send(&fwd, 2U, true);
+    }
   } else if ((rx->addr == ESP01_ADDR) && (dlc_to_len[rx->data_len_code] == 8U)) {
     uint16_t raw = (uint16_t)GET_BYTE(rx, 4) | ((uint16_t)GET_BYTE(rx, 5) << 8);         // ESP_v_Signal 32|16, 0.01 km/h
     epb_relay.speed_kph = raw / 100U;
